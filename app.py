@@ -1,5 +1,7 @@
 """Nasdaq / S&P 500 conservative ICT + FVG educational dashboard."""
 from datetime import datetime
+from pathlib import Path
+import json
 from zoneinfo import ZoneInfo
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,7 +12,7 @@ from strategy import prepare, completed_candles, evaluate
 ET = ZoneInfo('America/New_York')
 st.set_page_config(page_title='ICT + FVG | Nasdaq & S&P 500', page_icon='📈', layout='wide')
 st.title('📈 Nasdaq & S&P 500 | ICT + Fair Value Gap')
-st.caption('Conservative intraday scanner · 5m / 15m · Eastern Time · Analysis only, no automatic orders')
+st.caption('V3 · Conservative intraday scanner · 5m / 15m · Eastern Time · Telegram paper alerts via GitHub Actions · No automatic orders')
 
 MARKETS = {
     'Nasdaq-100 futures (E-mini NQ)': ('NQ=F', 'Futures'),
@@ -152,6 +154,37 @@ with help_col:
 
 **Entry reference** = completed confirmation candle close. **Stop** = sweep-to-signal extreme or 1.2 × ATR, whichever is farther. **Target** = selected risk multiple.''')
     st.caption('No assumption of fills, slippage, commission, margin, contract size, walk-forward validation, or profitability.')
+
+st.divider()
+st.subheader('📨 Telegram paper alerts and exit tracking')
+st.caption('The separate GitHub Actions monitor runs on a schedule even when this Streamlit browser tab is closed. It does not run inside Streamlit. Alerts require Telegram secrets and an enabled workflow. A scheduled check can arrive late or fail.')
+state_file = Path(__file__).parent / 'data' / 'alerts_state.json'
+if state_file.exists():
+    try:
+        alert_state = json.loads(state_file.read_text(encoding='utf-8'))
+        active_rows = []
+        for key, info in alert_state.get('monitors', {}).items():
+            trade = info.get('active')
+            if trade:
+                active_rows.append({'Market : timeframe': key, 'Side': trade['side'],
+                                    'Entry reference': trade['entry'], 'Stop': trade['stop'],
+                                    'Target': trade['target'], 'Signal time (ET)': trade['time_et']})
+        if active_rows:
+            st.markdown('**Active hypothetical paper setups**')
+            st.dataframe(pd.DataFrame(active_rows), hide_index=True, use_container_width=True)
+        else:
+            st.info('No tracked open paper setups in the latest repository state.')
+        events = alert_state.get('recent_events', [])
+        if events:
+            st.markdown('**Recent Telegram event log**')
+            st.dataframe(pd.DataFrame(events[-20:][::-1]), hide_index=True, use_container_width=True)
+        else:
+            st.caption('No alerts have been recorded yet. This does not confirm the monitor is running; check GitHub → Actions.')
+    except (OSError, ValueError, KeyError) as exc:
+        st.warning(f'Unable to read alert-state file: {exc}')
+else:
+    st.info('No alert-state file yet; upload data/alerts_state.json and configure the GitHub Actions workflow.')
+st.caption('The dashboard shows the state available in its deployed Git revision; GitHub may have a newer state. Monitor NQ, ES, Nasdaq-100 and S&P 500 cash indices on both 5m and 15m by default; other supported symbols can be enabled in the workflow.')
 
 st.divider()
 st.warning('Educational research tool only. ICT definitions are subjective; these are transparent mechanical proxies. Yahoo continuous futures symbols can include roll adjustments and delayed/incomplete quotes. Cash indices cannot be traded directly; NQ/ES futures and ETFs have different market hours, sizing, and risks. No live orders or broker credentials.')
