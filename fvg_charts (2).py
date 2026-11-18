@@ -1,0 +1,140 @@
+"""Read-only, contract-specific MES/MNQ charts for the research dashboard."""
+
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+
+from ict_paper_signals import paper_picks
+from selector_comparison import compare
+
+EASTERN = ZoneInfo("America/New_York")
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def completed_candles(url, key, instrument):
+    headers = {"apikey": key}
+    if not key.startswith(("sb_secret_", "sb_publishable_")):
+        headers["Authorization"] = "Bearer " + key
+    response = requests.get(
+        url.rstrip("/") + "/rest/v1/fvg_chart_candles", headers=headers,
+        params={"instrument": f"eq.{instrument}", "order": "start_ms.desc,live.desc,contract_symbol.asc",
+                "limit": 400, "select": "contract_symbol,start_ms,open,high,low,close,live"},
+        timeout=8, allow_redirects=False,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Candle history unavailable (HTTP {response.status_code})")
+    rows = response.json()
+    if not isinstance(rows, list):
+        raise ValueError("Unexpected candle history response")
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    return (frame.loc[frame.contract_symbol.eq(frame.iloc[0].contract_symbol)]
+            .sort_values("start_ms").reset_index(drop=True))
+
+
+def gaussian_channel(candles, span=20, width=2.0):
+    previous_close = candles.close.shift()
+    true_range = pd.concat([candles.high - candles.low,
+                            (candles.high - previous_close).abs(),
+                            (candles.low - previous_close).abs()], axis=1).max(axis=1)
+    smooth = pd.DataFrame({"Center": candles.close, "Range": true_range})
+    for _ in range(4):
+        smooth = smooth.ewm(span=span, adjust=False).mean()
+    margin = width * smooth["Range"]
+    return smooth["Center"], smooth["Center"] + margin, smooth["Center"] - margin
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def journal_days(url, key, day):
+    headers = {"apikey": key}
+    if not key.startswith("sb_secret_"):
+        headers["Authorization"] = "Bearer " + key
+    response = requests.get(
+        url.rstrip("/") + "/rest/v1/fvg_selector_journal", headers=headers,
+        params={"session_date": f"eq.{day}", "rule_version": "eq.v1", "order": "instrument,contract_symbol"},
+        timeout=8, allow_redirects=False,
+    )
+    if response.status_code != 200:
+        raise ValueError("Journal unavailable")
+    return response.json()
+
+
+def render_journal(url, key):
+    st.subheader("Persistent shadow comparison journal")
+    day = st.date_input("Journal date (Eastern)", value=datetime.now(EASTERN).date())
+    try:
+        rows = journal_days(url, key, day)
+    except (requests.RequestException, ValueError):
+        st.info("Journal unavailable. Check the SQL migration and journal service.")
+        return
+    if not rows:
+        st.info("No saved comparison snapshots for this date.")
+        return
+    for row in rows:
+        st.markdown(f"**{row['instrument']} · {row['contract_symbol']}**")
+        st.caption(f"{row['candle_count']} stored candles · {row['rule_version']} rules")
+        for label, field in (("Scorecard", "scores"), ("Signal agreement", "signals"), ("Simulated trades", "trades")):
+            st.markdown(label)
+            if row[field]:
+                st.dataframe(pd.DataFrame(row[field]), hide_index=True, use_container_width=True)
+            else:
+                st.caption("No records.")
+    
+
+def render_charts(url, key):
+    for label, symbol in (("Nasdaq-100 — MNQ", "MNQ"), ("S&P 500 — MES", "MES")):
+        st.subheader(label)
+        channel = st.checkbox("Gaussian Channel", value=True, key=f"gaussian_{symbol}")
+        try:
+            frame = completed_candles(url, key, symbol)
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            st.warning("Candle history unavailable. Check the chart migration and worker logs.")
+            continue
+        if frame.empty:
+            st.info("Waiting for completed one-minute candles from Railway.")
+            continue
+        times = pd.to_datetime(frame.start_ms, unit="ms", utc=True).dt.tz_convert(EASTERN)
+        labels = times.dt.strftime("%b %d %H:%M %Z")
+        fig = go.Figure(go.Candlestick(x=labels, open=frame.open, high=frame.high,
+                                       low=frame.low, close=frame.close, name=symbol))
+        if channel and len(frame) >= 20:
+            for name, values in zip(("Gaussian center", "Upper band", "Lower band"),
+                                    gaussian_channel(frame)):
+                fig.add_scatter(x=labels, y=values, mode="lines", name=name)
+        elif channel:
+            st.caption("Gaussian Channel appears after 20 completed candles.")
+        fig.update_layout(xaxis_type="category", xaxis_nticks=8, xaxis_title="Eastern Time",
+                          yaxis_title="Index points", xaxis_rangeslider_visible=False, height=400)
+        st.plotly_chart(fig, use_container_width=True, key=f"completed_candles_{symbol}")
+        st.markdown("**ICT paper-trade picks**")
+        st.caption("Rules-based ICT preview on stored candles. Uses a 10-bar sweep reference, "
+                   "a 12-bar setup expiry, and a 2R target. Prices are hypothetical references.")
+        picks = pd.DataFrame(paper_picks(list(frame.itertuples(index=False))))
+        if picks.empty:
+            st.info("No completed sweep → structure shift → fair value gap retest in the loaded candles.")
+        else:
+            picks["Signal close (Eastern)"] = (
+                pd.to_datetime(picks.pop("start_ms") + 60000, unit="ms", utc=True)
+                .dt.tz_convert(EASTERN).dt.strftime("%b %d %H:%M %Z")
+            )
+            st.dataframe(picks.iloc[::-1], hide_index=True, use_container_width=True)
+        with st.container():
+            st.markdown(f"**{symbol} · Trade selector comparison**")
+            scores, journal = compare(frame, symbol)
+            st.caption("Research replay of loaded candles, up to 400 rows per instrument. "
+                       "Both selectors use New York regular-hours signals, one contract, next-bar open, "
+                       "one tick slippage per side, $3 round-trip fees and a 2R target before costs. "
+                       "Stop takes priority when both levels are touched. Gaps leave open scenarios unresolved.")
+            st.dataframe(scores, hide_index=True, use_container_width=True)
+            if not journal.empty:
+                st.dataframe(journal.iloc[::-1], hide_index=True, use_container_width=True)
+        age = datetime.now(timezone.utc) - (times.iloc[-1] + pd.Timedelta(minutes=1))
+        st.caption(f"{frame.contract_symbol.iloc[-1]} · latest stored candle closed "
+                   f"{times.iloc[-1] + pd.Timedelta(minutes=1):%b %d %H:%M %Z} · "
+                   f"{max(0, int(age.total_seconds() / 60))} minutes ago. Includes validated replay when available.")
+    render_journal(url, key)
