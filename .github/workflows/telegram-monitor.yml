@@ -34,13 +34,13 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MONITOR_SYMBOLS: NQ,ES,NDX,SPX
         run: python monitor.py
-      - name: Commit alert state (deduplication and exit tracking)
+      - name: Commit alert state and V3.1 scanner audit
         if: always()
         run: |
-          if ! git diff --quiet -- data/alerts_state.json; then
+          if ! git diff --quiet -- data/alerts_state.json data/scanner_history.json || [ -n "$(git ls-files --others --exclude-standard data/scanner_history.json)" ]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add data/alerts_state.json
-            git commit -m 'Update ICT FVG paper alert state [skip ci]'
+            git add data/alerts_state.json data/scanner_history.json
+            git commit -m 'Update ICT FVG paper audit and alert state [skip ci]'
             git push
           fi
