@@ -10,14 +10,16 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from strategy import prepare, completed_candles, evaluate
+from validation_ui import render as render_validation
 
 ET = ZoneInfo('America/New_York')
 st.set_page_config(page_title='ICT + FVG | Nasdaq & S&P 500', page_icon='📈', layout='wide')
 st.title('📈 Nasdaq & S&P 500 | ICT + Fair Value Gap')
-st.caption('V3 · Conservative intraday scanner · 5m / 15m · Eastern Time · Telegram paper alerts via GitHub Actions · No automatic orders')
+st.caption('V3.1 · Conservative intraday scanner · 5m / 15m · Eastern Time · Telegram paper alerts via GitHub Actions · No automatic orders')
 
 
 def show_worker_charts():
+    # Preserved from current deployed GitHub app; do not alter its auth model.
     try:
         url = str(st.secrets.get("FVG_SUPABASE_URL", "")).strip().rstrip("/")
         key = str(st.secrets.get("FVG_SUPABASE_SECRET_KEY", "")).strip()
@@ -41,11 +43,16 @@ def show_worker_charts():
         if st.button("Lock charts"):
             st.session_state["fvg_chart_authorized"] = False
             st.rerun()
-        from fvg_charts import render_charts
+        try:
+            from fvg_charts import render_charts
+        except ImportError:
+            st.warning("Existing Railway charts need fvg_charts.py in the repository; no changes were made to this optional integration.")
+            return
         render_charts(url, key)
 
 
 show_worker_charts()
+render_validation()
 
 MARKETS = {
     'Nasdaq-100 futures (E-mini NQ)': ('NQ=F', 'Futures'),

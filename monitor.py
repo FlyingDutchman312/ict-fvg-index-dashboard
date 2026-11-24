@@ -15,6 +15,7 @@ import requests
 import yfinance as yf
 
 from strategy import completed_candles, evaluate, prepare
+from validation import snapshot, MAX_RECORDS
 
 ET = ZoneInfo('America/New_York')
 STATE_PATH = Path(__file__).parent / 'data' / 'alerts_state.json'
@@ -195,18 +196,54 @@ def main():
     if invalid:
         raise SystemExit(f'Invalid MONITOR_SYMBOLS values: {invalid}')
     state = read_state()
+    history_file = Path(__file__).parent / 'data' / 'scanner_history.json'
+    try:
+        history = json.loads(history_file.read_text(encoding='utf-8')) if history_file.exists() else {'version': 1, 'scans': []}
+        if not isinstance(history.get('scans'), list):
+            raise ValueError('scanner_history.json scans must be a list')
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f'Forward scan history cannot be loaded safely: {exc}')
     error_count = 0
     for symbol in dict.fromkeys(symbols):
         for interval in INTERVALS:
+            now = now_et()
+            captured = {'raw': None}
+            initial_events = len(state['recent_events'])
+            def captured_fetch(market, timeframe):
+                captured['raw'] = fetch(market, timeframe)
+                return captured['raw']
             try:
                 changed = process_symbol(symbol, interval, state,
-                                         lambda msg: send_telegram(msg, token, chat_id))
+                                         lambda msg: send_telegram(msg, token, chat_id),
+                                         now=now, fetcher=captured_fetch)
+                events_added = state['recent_events'][initial_events:]
+                if events_added:
+                    decision = 'ENTRY_ALERT' if events_added[-1]['type'] == 'ENTRY' else 'EXIT_ALERT'
+                elif state['monitors'].get(f'{symbol}:{interval}', {}).get('active'):
+                    decision = 'ACTIVE_PAPER_SETUP'
+                else:
+                    decision = 'NO_FRESH_ENTRY'
                 if changed:
                     state['recent_events'] = state['recent_events'][-100:]
-                    write_state(state)  # persist sent alerts even if next symbol fails
+                    write_state(state)  # preserve V3 sent-alert ledger
+                record = snapshot(symbol, interval, captured['raw'], now, decision)
+                if record['data_status'] in ('NO_DATA', 'INSUFFICIENT_BARS', 'ERROR'):
+                    print(f'V3.1 {symbol}:{interval}: {record["data_status"]}')
+                else:
+                    print(f'V3.1 {symbol}:{interval}: {decision}, data={record["data_status"]}, '
+                          f'lag={record["lag_minutes"]}m, bars={record["bars"]}')
             except Exception as exc:
                 error_count += 1
-                print(f'ERROR {symbol}:{interval}: {type(exc).__name__}: {exc}')
+                reason = f'{type(exc).__name__}: {exc}'
+                print(f'ERROR {symbol}:{interval}: {reason}')
+                record = snapshot(symbol, interval, captured['raw'], now, 'SCAN_ERROR', error=reason[:350])
+            history['scans'].append(record)
+    history['scans'] = history['scans'][-MAX_RECORDS:]
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = history_file.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(history, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    tmp.replace(history_file)
+    print(f'V3.1 audit persisted: {len(history["scans"])} total retained scanner observations')
     if error_count:
         raise SystemExit(f'{error_count} scanner(s) encountered errors; see logs. Other successful alerts persisted locally.')
     print('Monitor completed: paper only, no brokerage connections')

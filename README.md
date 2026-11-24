@@ -1,4 +1,4 @@
-# Nasdaq & S&P 500 ICT + FVG Conservative Dashboard — V3
+# Nasdaq & S&P 500 ICT + FVG Conservative Dashboard — V3.1
 
 ## Features
 - Streamlit charts for NQ/ES futures, Nasdaq/S&P 500 indices, and QQQ/SPY ETFs, using 5-minute and 15-minute historical Yahoo Finance candles.
@@ -45,3 +45,15 @@ streamlit run app.py
 ```
 
 Official documentation: [Telegram Bot API](https://core.telegram.org/bots/api), [GitHub Actions schedule](https://docs.github.com/en/actions/reference/events-that-trigger-workflows#schedule).
+
+
+## V3.1 — Forward scanner audit and validation scorecard
+- Replacement root files: `app.py`, `monitor.py`, `validation.py`, `validation_ui.py`, plus existing `strategy.py`, `requirements.txt`, `telegram_test.py`.
+- Additional data file: `data/scanner_history.json` (initially empty). **Do not replace your existing** `data/alerts_state.json` if it contains paper trades.
+- Replace `.github/workflows/telegram-monitor.yml` with the V3.1 version. It commits BOTH alert state and forward scanner audit.
+- Dashboard reads the public GitHub `main` branch audit JSON (90-second cache) rather than relying only on the Streamlit deployment snapshot. Public repository means these audit observations are public.
+- V3.1 records one observation per market / timeframe / scan, including checks with no signal, historical setup counts, stale-data status, and latest-bar indicator checks. It keeps the latest 4,000 records. **A bar condition count is not a validated strategy trade and is not a win rate.**
+- Existing strategy thresholds and 2:1 targets are unchanged. Telegram delivery remains subject to data and GitHub scheduling delays; no orders are sent.
+- **Important**: the deployed app has an optional MES/MNQ Railway chart integration using `fvg_charts.py`. V3.1 preserves that integration, but the GitHub repository may need the existing `fvg_charts.py` source file for it to display.
+- First test: GitHub Actions → ICT FVG Telegram Paper Alerts → Run workflow. Inspect logs for `V3.1 audit persisted` and open `data/scanner_history.json`. Verify the dashboard scorecard displays nonzero scanner observations.
+- Do not upload GitHub/Telegram secrets or your private keys in these files.
