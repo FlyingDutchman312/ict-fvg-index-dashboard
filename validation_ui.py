@@ -11,6 +11,14 @@ REPO = 'FlyingDutchman312/ict-fvg-index-dashboard'
 
 @st.cache_data(ttl=90, show_spinner=False)
 def get_audit():
+    # Explicit cutover: configured Railway reads never fall back to old GitHub history.
+    cfg = st.secrets.get('ict_scanner', {})
+    if cfg.get('enabled', False):
+        from ict_scanner_read import read_scanner
+        try:
+            return read_scanner(str(cfg.get('url', '')), str(cfg.get('publishable_key', '')))
+        except Exception as exc:
+            return {'scans': []}, 'Railway scanner unavailable ('+type(exc).__name__+') — check configuration and migration'
     # Public repository; no token in browser or Streamlit secrets.
     url = f'https://raw.githubusercontent.com/{REPO}/main/data/scanner_history.json'
     try:
@@ -40,8 +48,16 @@ def render():
         payload, source = get_audit()
         st.caption(f'Data source: {source}')
         records = payload.get('scans', [])
+        if 'latest_cycle' in payload:
+            cycle = payload['latest_cycle']
+            if not cycle:
+                st.warning('No Railway scanner cycle recorded yet.')
+            else:
+                st.caption('Latest Railway cycle started '+str(cycle['started_at'])+' · completed '+str(cycle['finished_at'])+' · observations '+str(cycle['observation_count'])+' · errors '+str(cycle['errors'])+' · alerts requested '+str(cycle['alerts_enabled']))
+                if cycle['errors'] or not cycle['finished_at']:
+                    st.warning('Latest Railway cycle has errors or has not completed. A running process alone does not confirm coverage.')
         if not records:
-            st.info('No saved forward observations yet. After uploading V3.1, run the ICT FVG Telegram Paper Alerts workflow once; it will save a scan record even when no entry signal qualifies.')
+            st.info('No saved forward observations from the selected source. Check the Railway scanner cycle or, before migration only, the GitHub workflow.')
             return
         df = pd.DataFrame(records)
         if 'checked_at_utc' not in df.columns:
@@ -61,7 +77,7 @@ def render():
         c3.metric('Fresh-data checks', int((df.get('data_status', pd.Series(dtype=str)) == 'FRESH').sum()))
         c4.metric('Paper entry alerts', int((df.get('decision', pd.Series(dtype=str)) == 'ENTRY_ALERT').sum()))
         if age > 35:
-            st.warning(f'Latest stored scan is {age:.0f} minutes old. This can be normal outside the workflow schedule; review GitHub Actions for current monitoring health.')
+            st.warning(f'Latest stored scan is {age:.0f} minutes old. The selected collector is not providing current observations. Check its worker logs; candle freshness is a separate measurement.')
         if 'market' in df:
             markets = sorted(df.market.dropna().unique().tolist())
             selected = st.multiselect('Markets to review', markets, default=markets, key='v31_market_filter')
@@ -88,3 +104,4 @@ def render():
         st.download_button('Download forward scan observations (CSV)', df.to_csv(index=False).encode(),
                            file_name='ict_fvg_v31_forward_scans.csv', mime='text/csv')
         st.info('Milestone gate: before changing filters, collect repeated fresh in-session observations, verify independent alert/exit events, and assess outcome quality. Zero alerts does not prove the system is broken or profitable.')
+
